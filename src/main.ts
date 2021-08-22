@@ -90,6 +90,12 @@ export default class ReminderPlugin extends Plugin {
       console.log("codemirror", cm);
       */
     });
+
+    if (this.app.workspace.layoutReady) {
+      this.showReminderList();
+    } else {
+      (this.app.workspace as any).on("layout-ready", this.showReminderList.bind(this))
+    }
   }
 
   private setupCommands() {
