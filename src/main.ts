@@ -69,7 +69,7 @@ export default class ReminderPlugin extends Plugin {
       this.editDetector.fileChanged();
     });
     this.registerCodeMirror((cm: CodeMirror.Editor) => {
-      const dateTimeChooser = new DateTimeChooserView(cm);
+      const dateTimeChooser = new DateTimeChooserView(cm, this.reminders);
       cm.on(
         "change",
         (cmEditor: CodeMirror.Editor, changeObj: CodeMirror.EditorChange) => {
