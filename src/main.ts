@@ -7,13 +7,16 @@ import {
   App,
   Plugin,
   PluginManifest,
-  WorkspaceLeaf
+  WorkspaceLeaf,
+  ObsidianProtocolData
 } from "obsidian";
 import { monkeyPatchConsole } from "obsidian-debug-mobile";
 import { ReminderSettingTab, SETTINGS } from "settings";
+import { GoogleCalendarClient } from "sync/googlecalendar";
 import { AutoComplete } from "ui/autocomplete";
 import { DateTimeChooserView } from "ui/datetime-chooser";
 import { openDateTimeFormatChooser } from "ui/datetime-format-modal";
+import { showAuthorizationModal } from "ui/google-auth-model";
 import { ReminderModal } from "ui/reminder";
 import { ReminderListItemViewProxy } from "ui/reminder-list";
 import { OkCancel, showOkCancelDialog } from "ui/util";
@@ -27,6 +30,7 @@ export default class ReminderPlugin extends Plugin {
   private editDetector: EditDetector;
   private reminderModal: ReminderModal;
   private autoComplete: AutoComplete;
+  private googleCalendar: GoogleCalendarClient;
 
   constructor(app: App, manifest: PluginManifest) {
     super(app, manifest);
@@ -57,6 +61,8 @@ export default class ReminderPlugin extends Plugin {
     );
     this.reminderModal = new ReminderModal(this.app, SETTINGS.useSystemNotification, SETTINGS.laters);
     this.autoComplete = new AutoComplete(SETTINGS.autoCompleteTrigger);
+    this.googleCalendar = new GoogleCalendarClient(this.pluginDataIO.googleApiRefreshToken, this.pluginDataIO.googleCalendarId);
+    this.pluginDataIO.addReminderSynchronizer(this.googleCalendar);
   }
 
   override async onload() {
@@ -68,6 +74,10 @@ export default class ReminderPlugin extends Plugin {
     this.setupCommands();
     this.watchVault();
     this.startPeriodicTask();
+
+    if (this.googleCalendar.setupReady()) {
+      await this.connectToGoogleCalendar();
+    }
   }
 
   private setupUI() {
@@ -95,6 +105,16 @@ export default class ReminderPlugin extends Plugin {
           return;
         }
       );
+    });
+    this.registerObsidianProtocolHandler("show-reminder", (params: ObsidianProtocolData) => {
+      const file = params["file"]!;
+      const title = params["title"]!;
+      const found = this.reminders.find({ file, title })
+      if (found == null) {
+        console.error("reminder not found: %o", params);
+        return;
+      }
+      this.showReminder(found);
     });
 
     // Open reminder list view
@@ -189,6 +209,41 @@ export default class ReminderPlugin extends Plugin {
         this.remindersController.toggleCheck(view.file, editor.getCursor().line);
       },
     });
+
+    this.addCommand({
+      id: "connect-to-google-calendar",
+      name: "Connect to Google Calendar",
+      checkCallback: (checking: boolean): boolean | void => {
+        if (checking) {
+          return true;
+        }
+        this.connectToGoogleCalendar();
+      }
+    });
+    this.addCommand({
+      id: "disconnect-from-google-calendar",
+      name: "Disconnect from Google Calendar",
+      checkCallback: (checking: boolean): boolean | void => {
+        if (checking) {
+          return true;
+        }
+        this.disconnectFromGoogleCalendar();
+      }
+    });
+  }
+
+  private async connectToGoogleCalendar() {
+    if (await this.googleCalendar.restoreAuthorization()) {
+      return;
+    }
+    const authUrl = this.googleCalendar.generateAuthUrl();
+    showAuthorizationModal(this.app, authUrl, (code, calendarId) => {
+      return this.googleCalendar.authorize(code, calendarId);
+    })
+  }
+
+  private async disconnectFromGoogleCalendar() {
+    this.googleCalendar.disconnect();
   }
 
   private watchVault() {
@@ -224,6 +279,20 @@ export default class ReminderPlugin extends Plugin {
         });
       }, SETTINGS.reminderCheckIntervalSec.value * 1000)
     );
+
+    let syncRunning = false;
+    this.registerInterval(
+      window.setInterval(() => {
+        if (syncRunning) {
+          console.log("Skig reminder sync because the task is already running.");
+          return;
+        }
+        syncRunning = true;
+        this.pluginDataIO.synchronizeRemindersIfNeeded().finally(() => {
+          syncRunning = false;
+        });
+      }, 10 * 1000)
+    )
   }
 
   private async periodicTask(): Promise<void> {
